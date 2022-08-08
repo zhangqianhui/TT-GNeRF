@@ -5,10 +5,11 @@
 [paper (Arxiv coming soon)]() [project page](https://zhangqianhui.github.io/TT-GNeRF/) <br>
 University of Trento, Snap Research, ETH Zurich
 
+*Attribute Editing results with multple-view generation*
 ![](./imgs/teaser_opti.gif)
 
-
-
+*Geometry Editing results with multple-view generation*
+![](./imgs/geometry.gif)
 
 # To-do list
 
