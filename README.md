@@ -11,6 +11,9 @@ University of Trento, Snap Research, ETH Zurich
 *Geometry Editing results with multple-view generation*
 ![](./imgs/geometry.gif)
 
+*GAN inversion for Real Image Editing with multiple-view generation*
+![](./imgs/real.gif)
+
 # To-do list
 
 paper, model and code
