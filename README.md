@@ -20,7 +20,7 @@ University of Trento, Snap Research, ETH Zurich
 conda create -n ttgnerf python=3.6
 ```
 ```
-pip install -r requirement.txt
+pip install -r req.txt
 ```
 
 ## Demo 
@@ -80,7 +80,6 @@ python train_step_Triot_PTI_styleflow.py --outdir=[output_path_v3] \
             --file_id 17 \
             --num_steps 150 \
 ```
-
 
 ### Reference Image Geometry Transfer
 
