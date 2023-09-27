@@ -16,4 +16,4 @@ University of Trento, Snap Research, ETH Zurich
 
 # To-do list
 
-paper, model and code
+model and code
