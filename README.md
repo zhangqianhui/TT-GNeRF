@@ -92,15 +92,13 @@ python train_step_reference_geometry_editing.py --outdir=[output_path] --batch=1
 
 ## Pretrained Model and Dataset
 
-[our dataset path]:
+[our dataset path](https://drive.google.com/file/d/18pHM_MSp7CJ78SyXlVhRXXdLY7ivujGh/view?usp=drive_link):
 
-[cnf pretrained model path]:
+[cnf pretrained model path](https://drive.google.com/file/d/1_8r71EGVUwi8REq-PWMP1BJh5OlU0LJh/view?usp=drive_link):
 
-[label path]:
+[label path](https://drive.google.com/file/d/1UhpkuvEE4XLUggv1nwBz9Rflpnpxo85y/view?usp=drive_link):
 
-[pretrained eg3d model]: 
-
-To-Do List (Next Week)
+[pretrained eg3d model](https://drive.google.com/file/d/1uBWGRbnhMxuJCYVryV4YeEO4JxBJBoE_/view?usp=drive_link): 
 
 # Questions
 
@@ -108,4 +106,4 @@ If you have any questions/comments, feel free to open a github issue or pull a r
 
 # Reference code
 
-We would like to thank [EG3D](https://github.com/NVlabs/eg3d) for providing such a great and powerful codebase.
+We would like to thank [EG3D](https://github.com/NVlabs/eg3d) and [StyleFlow](https://github.com/RameenAbdal/StyleFlow) for providing such a great and powerful codebase.
