@@ -1,0 +1,15 @@
+{
+    "Token":"PtoapHjilC_xaKBUnZJ8gA",
+    "business_flag": "TEG_AILab_CVC_DigitalContent",
+    "model_local_file_path": "/apdcephfs/share_1330077/chjingzhang/cvpr2024/eg3d/eg3d/eg3d",
+    "host_num": 1,
+    "host_gpu_num": 1,
+    "GPUName": "V100",
+    "image_full_name": "mirrors.tencent.com/avatarv2/eg3davatar:v6",
+    "task_flag": "training_8_13",
+    "priority_level": "LOW",
+    "elastic_level": 1,
+    "cuda_version": "11.0",
+    "is_elasticity": true,
+
+}
