@@ -94,8 +94,11 @@ python train_step_reference_geometry_editing.py --outdir=[output_path] --batch=1
 ## Pretrained Model and Dataset
 
 [our dataset path]:
+
 [cnf pretrained model path]:
+
 [label path]:
+
 [pretrained eg3d model]: 
 
 To-Do List (Next Week)
