@@ -28,7 +28,7 @@ class RegionL1lossOp(torch.nn.Module):
         self.l1_loss = torch.nn.L1Loss()
         n_classes = 19
         self.net = BiSeNet(n_classes=n_classes)
-        self.net.load_state_dict(torch.load('/nfs/data_todi/jzhang/code/eg3d/eg3d/pretrained_model/79999_iter.pth'))
+        self.net.load_state_dict(torch.load('./79999_iter.pth'))
         for param in self.net.parameters():
             param.requires_grad = False
 

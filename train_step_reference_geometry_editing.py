@@ -366,7 +366,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="EG3D inversion")
     parser.add_argument("--network_pkl", type=str,
-                        default='/nfs/data_chaos/jzhang/dataset/pretrained/eg3d/ffhq512-128.pkl',
+                        default='',
                         help="path to the network pkl")
     parser.add_argument("--outdir", type=str, default='./outputs/', help="path to the lmdb dataset")
     parser.add_argument("--w_dir", type=str, default='./outputs/', help="the save w path")

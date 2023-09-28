@@ -28,6 +28,8 @@ pip install -r req.txt
 
 ### Editing (EG3D)
 
+Please edit the file training/loss.py to change the path of BiSeNet model. You can download [BiSeBet](https://drive.google.com/file/d/1s887f2x2rYGVOVgwB-Tusas7CB1KQu2E/view?usp=drive_link) from the given pretrained
+model path.
 ```
 python train_step_Triot_styleflow.py --outdir=[output_path] \
             --network=[pretrained eg3d model] \
