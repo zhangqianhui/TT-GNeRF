@@ -5,15 +5,6 @@
 [paper](https://arxiv.org/pdf/2208.12550.pdf) <br>
 University of Trento, Snap Research, ETH Zurich
 
-*Attribute Editing results with multple-view generation*
-![](./imgs/teaser_opti.gif)
-
-*Geometry Editing results with multple-view generation*
-![](./imgs/geometry.gif)
-
-*GAN inversion for Real Image Editing with multiple-view generation*
-![](./imgs/real.gif)
-
 ## Environments
 
 ```
