@@ -14,7 +14,9 @@ conda create -n ttgnerf python=3.6
 pip install -r req.txt
 ```
 
-## Demo 
+## Results
+
+<img src="./imgs/img.png" width="600"> 
 
 
 ### Editing (EG3D)
