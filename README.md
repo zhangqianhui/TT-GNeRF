@@ -2,7 +2,7 @@
 **Training and Tuning Generative Neural Radiance Fields for Attribute-Conditional 3D-Aware Face Generation**  
 [Jichao Zhang](https://zhangqianhui.github.io/), [Aliaksandr Siarohin](https://scholar.google.com/citations?user=uMl5-k4AAAAJ&hl=en), [Yahui Liu](https://scholar.google.com/citations?hl=en&user=P8qd0rEAAAAJ), [Hao Tang](https://scholar.google.com/citations?user=9zJkeEMAAAAJ&hl=en), 
 [Nicu Sebe](http://disi.unitn.it/~sebe/), [Wei Wang](https://weiwangtrento.github.io/) <br>
-[paper](https://arxiv.org/pdf/2208.12550.pdf) <br>
+[paper](https://arxiv.org/pdf/2208.12550.pdf) [Demo-Video](https://ttgnerf.github.io/TT-GNeRF/)<br>
 University of Trento, Snap Research, ETH Zurich
 
 ## Environments
@@ -17,7 +17,6 @@ pip install -r req.txt
 ## Results
 
 <img src="./imgs/img.png" width="600"> 
-
 
 ### Editing (EG3D)
 
