@@ -18,6 +18,7 @@ from . import metric_utils
 
 #----------------------------------------------------------------------------
 
+
 def compute_distances(row_features, col_features, num_gpus, rank, col_batch_size):
     assert 0 <= rank < num_gpus
     num_cols = col_features.shape[0]
