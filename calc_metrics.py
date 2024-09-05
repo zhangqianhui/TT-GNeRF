@@ -9,14 +9,12 @@
 # its affiliates is strictly prohibited.
 
 """Calculate quality metrics for previous training run or pretrained network pickle."""
-
 import os
 import click
 import json
 import tempfile
 import copy
 import torch
-
 import dnnlib
 import legacy
 from metrics import metric_main

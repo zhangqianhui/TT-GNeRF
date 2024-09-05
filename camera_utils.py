@@ -13,7 +13,6 @@ Helper functions for constructing camera parameter matrices. Primarily used in v
 """
 
 import math
-
 import torch
 import torch.nn as nn
 
