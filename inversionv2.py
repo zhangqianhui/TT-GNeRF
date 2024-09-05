@@ -9,7 +9,6 @@
 # its affiliates is strictly prohibited.
 
 """Generate images and shapes using pretrained network pickle."""
-
 import os
 import re
 from typing import List, Optional, Tuple, Union

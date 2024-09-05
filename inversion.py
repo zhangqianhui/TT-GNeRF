@@ -13,7 +13,6 @@
 import os
 import re
 from typing import List, Optional, Tuple, Union
-
 import click
 import dnnlib
 import numpy as np

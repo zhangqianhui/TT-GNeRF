@@ -9,7 +9,6 @@
 # its affiliates is strictly prohibited.
 
 """Converting legacy network pickle into the new format."""
-
 import click
 import pickle
 import re

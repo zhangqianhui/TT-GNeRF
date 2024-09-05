@@ -19,8 +19,6 @@ Ex.
 Ex.
     python shape_utils.py myshapes_directory --level=12
 """
-
-
 import time
 import plyfile
 import glob
@@ -35,7 +33,6 @@ import skimage.measure
 import argparse
 import mrcfile
 from tqdm import tqdm
-        
 
 def convert_sdf_samples_to_ply(
     numpy_3d_sdf_tensor,
