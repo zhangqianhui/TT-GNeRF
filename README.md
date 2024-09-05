@@ -2,7 +2,7 @@
 **Training and Tuning Generative Neural Radiance Fields for Attribute-Conditional 3D-Aware Face Generation**  
 [Jichao Zhang](https://zhangqianhui.github.io/), [Aliaksandr Siarohin](https://scholar.google.com/citations?user=uMl5-k4AAAAJ&hl=en), [Yahui Liu](https://scholar.google.com/citations?hl=en&user=P8qd0rEAAAAJ), [Hao Tang](https://scholar.google.com/citations?user=9zJkeEMAAAAJ&hl=en), 
 [Nicu Sebe](http://disi.unitn.it/~sebe/), [Wei Wang](https://weiwangtrento.github.io/) <br>
-[paper](https://arxiv.org/pdf/2208.12550.pdf) [Demo-Video](https://ttgnerf.github.io/TT-GNeRF/)<br>
+[Demo-Video](https://ttgnerf.github.io/TT-GNeRF/)<br>
 Ocean University of China, Snap Research, Huawei, Peking University, University of Trento, Beijing Jiaotong University
 
 
@@ -72,7 +72,7 @@ python test_reference_geometry_editing.py --outdir=[output_path] --batch=1 \
 
 [our dataset path](https://drive.google.com/file/d/18pHM_MSp7CJ78SyXlVhRXXdLY7ivujGh/view?usp=drive_link):
 
-[face_id_path](https://drive.google.com/file/d/18pHM_MSp7CJ78SyXlVhRXXdLY7ivujGh/view?usp=drive_link):
+[face_id_path](https://drive.google.com/file/d/17_jEQEKupaUt8rhsyjObWQ00SGnCnzFW/view?usp=sharing):
 
 [cnf pretrained model path](https://drive.google.com/file/d/1_8r71EGVUwi8REq-PWMP1BJh5OlU0LJh/view?usp=drive_link):
 
