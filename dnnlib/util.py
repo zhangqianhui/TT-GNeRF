@@ -9,7 +9,6 @@
 # its affiliates is strictly prohibited.
 
 """Miscellaneous utility classes and functions."""
-
 import ctypes
 import fnmatch
 import importlib
