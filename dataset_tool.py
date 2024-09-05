@@ -22,7 +22,6 @@ import tarfile
 import zipfile
 from pathlib import Path
 from typing import Callable, Optional, Tuple, Union
-
 import click
 import numpy as np
 import PIL.Image

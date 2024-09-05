@@ -10,7 +10,6 @@
 
 import click
 import os
-
 import multiprocessing
 import numpy as np
 import imgui
