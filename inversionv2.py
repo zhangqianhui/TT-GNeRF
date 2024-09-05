@@ -174,6 +174,7 @@ def inversion(
     id_name = '{:0>5}.png'.format(file_id)
 
     target = cv2.imread(os.path.join("/nfs/data_chaos/jzhang/code/StyleSDF/FFHQ_inversion/aligned/", id_name))
+
     target = target[:,:,::-1].copy()
 
     with open("/nfs/data_chaos/jzhang/code/StyleSDF/FFHQ_inversion/aligned/dataset.json", 'rb') as f:

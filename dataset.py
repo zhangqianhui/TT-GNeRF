@@ -73,8 +73,6 @@ class FFHQFake(Dataset):
             self.label_list.append(item_list)
             self.style_list.append(items[0])
 
-        print(len(self.label_list))
-
     def __len__(self):
         return len(self.label_list)
 
@@ -82,19 +80,11 @@ class FFHQFake(Dataset):
 
         imgname = self.style_list[index]
 
-        print(imgname)
-
         datapath = self.dataset_path.split('*.png')[0]
-
-        print(datapath)
 
         imgpath = os.path.join(datapath, imgname)
 
-        print(imgpath)
-
         styles_path = imgpath.split('.png')[0] + '_ws.npy'
-
-        print(styles_path)
 
         labels = np.array(self.label_list[index])
 

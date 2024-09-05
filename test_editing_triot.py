@@ -12,28 +12,28 @@
 import argparse
 import os
 import re
-from typing import List, Optional, Tuple, Union
-
+from typing import List, Tuple, Union
+import legacy
 import click
 import dnnlib
 import numpy as np
-import PIL.Image
 import torch
 from tqdm import tqdm
-import mrcfile
 from torch.nn import functional as F
 import functools
 import imageio
-
 from camera_utils import LookAtPoseSampler, FOV_to_intrinsics
 from torch.utils import data
 from torch import autograd
+from training.loss import RegionL1lossOp_Kmeans, RegionL1loss_Normal_Kmeans
 from training.loss import RegionL1lossOp, RegionL1loss_Normal
 from module.flow import cnf
 from torchvision import transforms, utils
 from dataset import FFHQFake
-
-#----------------------------------------------------------------------------
+import copy
+from torch_utils import misc
+from PIL import Image
+import PIL
 
 def parse_range(s: Union[str, List]) -> List[int]:
     '''Parse a comma separated list of numbers or ranges and return a list of ints.
@@ -205,6 +205,20 @@ def accumulate(model1, model2, decay=0.999):
         if 'style_editing' in k:
             par1[k].data.mul_(decay).add_(par2[k].data, alpha=1 - decay)
 
+def project_to_vector(v, u):
+    return (u.dot(v) / u.dot(u)) * u.clone()
+
+def gram_schmidt(vv):
+    nk = vv.size(0)
+    uu = torch.zeros_like(vv, device=vv.device, dtype=vv.dtype)
+    uu[0] += vv[0]
+    for k in range(1, nk):
+        uu[k] += vv[k]
+        for j in range(0, k):
+            uu[k] -= project_to_vector(vv[k], uu[j])
+        uu[k] /= uu[k].norm()
+    return uu
+
 def training_steps(
     network_pkl,
     truncation_psi,
@@ -225,8 +239,12 @@ def training_steps(
     file_id,
     cnf_path,
     flow_modules,
-    lambda_normal
+    lambda_normal,
+    mask_path,
+    norm_loss
 ):
+
+    mask_path = os.path.join(mask_path, str(args.file_id))
 
     device = torch.device('cuda')
     G = torch.load(network_pkl)['G_ema'].to(device)
@@ -243,278 +261,204 @@ def training_steps(
     cnf_ckpt_path = os.path.join(cnf_path, 'modellarge10k_010000.pt')
     prior.load_state_dict(torch.load(cnf_ckpt_path))
 
+    outdir  = outdir + '_' + str(file_id) + '_' + str(finetune_id) + '_' + str(scale) + '_' +  str(num_steps) + '_' + str(lambda_normal) + '_' + str(norm_loss)
+
+    if not os.path.exists(outdir):
+        os.mkdir(outdir)
+
+    # hair color 1: brown hair color 0
+    # gender 1: female               1
+    # bangs 1: remove bangs          1
+    # age 1: old                     1
+    # Smile 1: smiling               0
+    # Beard 1: beard                 1
+    finetune_id = finetune_id
+    label_dim = 6
+
+    random_label = torch.randint(0, 1, (1, label_dim), device=device).float()
+
+    scale = scale
+
+    if finetune_id < label_dim:
+
+        random_label[:, finetune_id] = scale - random_label[:, finetune_id]
+        label_str = str(random_label[0, 0].cpu().numpy())
+        for item in range(random_label.shape[1] - 1):
+            label_str += '_' + str(random_label[0, item + 1].cpu().numpy())
+
+    elif finetune_id < label_dim * 2:
+        random_label[:, finetune_id - label_dim] = -scale - random_label[:, finetune_id - label_dim]
+
+        label_str = str(random_label[0, 0].cpu().numpy())
+        for item in range(random_label.shape[1] - 1):
+            label_str += '_' + str(random_label[0, item + 1].cpu().numpy())
+
+    if finetune_id == label_dim * 2:
+
+        label_str = '0_0_0'
+        random_label[:, :] = 0.0
+
     original_label = torch.tensor([dataset[file_id][1]]).float()
     w = torch.from_numpy(dataset[file_id][2]).unsqueeze(0)
     w_o = w.to(device)
     original_label = original_label.to(device)
 
+    #w_o = w_o.squeeze(0)
+
+    approx21, _ = prior(w_o, original_label, torch.zeros(1, w_o.shape[1], 1).to(w_o))
+    rev = prior(approx21, original_label + random_label, torch.zeros(1, w_o.shape[1], 1).to(w_o), True)
+    w_o_ = rev[0]
+
+    approx21, _ = prior(w_o, original_label, torch.zeros(1, w_o.shape[1], 1).to(w_o))
+    rev_ = prior(approx21, original_label + random_label, torch.zeros(1, w_o.shape[1], 1).to(w_o), True)
+    w_o__ = rev_[0]
+
+    w_o_copy = w_o_.clone().detach()
+
+    w_o_ = w_o_.detach()
+
+    w_o_.requires_grad = True
+
+    initial_learning_rate = 0.0005
+    opti_w = torch.optim.Adam({w_o_}, betas=(0.9, 0.99), lr=initial_learning_rate)
+
+    num_steps = num_steps
+
     # loss
-    regionl1 = RegionL1lossOp()
-    regionl1n = RegionL1loss_Normal()
+    regionl1 = RegionL1lossOp_Kmeans(mask_path)
+    regionl1n = RegionL1loss_Normal_Kmeans(mask_path)
+
+    # regionl1 = RegionL1lossOp()
+    # regionl1n = RegionL1loss_Normal(norm_loss)
+
+
     intrinsics = FOV_to_intrinsics(fov_deg, device=device)
 
-    for stage in range(0, 3):
+    for step in range(num_steps):
 
-        print(original_label)
+        # angle_p = np.random.uniform(-0.5, 0.5, 1)[0]
+        # angle_y = np.random.uniform(-0.5, 0.5, 1)[0]
+        angle_p = 0.0
+        angle_y = 0.0
 
-        if stage == 0:
-            finetune_id = 4
-            scale = -1.5
-        elif stage == 1:
-            finetune_id = 1
-            scale = 1.5
-            num_steps = 100
+        cam_pivot = torch.tensor(G.rendering_kwargs.get('avg_camera_pivot', [0, 0, 0]), device=device)
+        cam_radius = G.rendering_kwargs.get('avg_camera_radius', 2.7)
+        cam2world_pose = LookAtPoseSampler.sample(np.pi/2 + angle_y, np.pi/2 + angle_p, cam_pivot, radius=cam_radius, device=device)
+        camera_params = torch.cat([cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
 
-        elif stage == 2:
-            finetune_id = 0
-            scale = 1.5
-            num_steps = 100
+        real_imgs_dict = G.synthesis(w_o, camera_params, neural_rendering_resolution=128)
+        fake_imgs_dict = G.synthesis(w_o_, camera_params, neural_rendering_resolution=128)
+        fake_imgs_init_dict = G.synthesis(w_o_copy, camera_params, neural_rendering_resolution=128)
 
+        image_depth_o = real_imgs_dict['image_depth'].squeeze(1)
+        image_depth_f = fake_imgs_dict['image_depth'].squeeze(1)
+        image_depth_f_o = fake_imgs_init_dict['image_depth'].squeeze(1)
 
-        outdir_  = outdir + '_' + str(file_id) + '_' + str(finetune_id) + '_' + str(scale) + '_' +  str(num_steps) + '_' + str(lambda_normal)
+        image_normal_o = depth2normal(image_depth_o)
+        image_normal_f = depth2normal(image_depth_f)
+        image_normal_f_o = depth2normal(image_depth_f_o)
 
-        if not os.path.exists(outdir_):
-            os.mkdir(outdir_)
-
-        # hair color 1: brown hair color
-        # gender 1: female
-        # bangs 1: remove bangs
-        # age 1: old
-        # Smile 1: non-smiling
-        # Beard 1: beard
-
-        finetune_id = finetune_id
-        label_dim = 6
-
-        random_label = torch.randint(0, 1, (1, label_dim), device=device).float()
-
-        scale = scale
-
-        if finetune_id < label_dim:
-
-            random_label[:, finetune_id] = scale - random_label[:, finetune_id]
-            label_str = str(random_label[0, 0].cpu().numpy())
-            for item in range(random_label.shape[1] - 1):
-                label_str += '_' + str(random_label[0, item + 1].cpu().numpy())
-
-        elif finetune_id < label_dim * 2:
-            random_label[:, finetune_id - label_dim] = -scale - random_label[:, finetune_id - label_dim]
-
-            label_str = str(random_label[0, 0].cpu().numpy())
-            for item in range(random_label.shape[1] - 1):
-                label_str += '_' + str(random_label[0, item + 1].cpu().numpy())
-
-        if finetune_id == label_dim * 2:
-
-            label_str = '0_0_0'
-            random_label[:, :] = 0.0
-
-        approx21, _ = prior(w_o, original_label, torch.zeros(1, w_o.shape[1], 1).to(w_o))
-        rev = prior(approx21, original_label + random_label, torch.zeros(1, w_o.shape[1], 1).to(w_o), True)
-        w_o_ = rev[0]
-
-        w_o_copy = w_o_.clone().detach()
-
-        w_o_ = w_o_.detach()
-
-        w_o_.requires_grad = True
-
-        initial_learning_rate = 0.0005
-        opti_w = torch.optim.Adam({w_o_}, betas=(0.9, 0.99), lr=initial_learning_rate)
-
-        num_steps = num_steps
-
-        for step in range(num_steps):
-
-            angle_p = np.random.uniform(-0.5, 0.5, 1)[0]
-            angle_y = np.random.uniform(-0.5, 0.5, 1)[0]
-
-            cam_pivot = torch.tensor(G.rendering_kwargs.get('avg_camera_pivot', [0, 0, 0]), device=device)
-            cam_radius = G.rendering_kwargs.get('avg_camera_radius', 2.7)
-            cam2world_pose = LookAtPoseSampler.sample(np.pi/2 + angle_y, np.pi/2 + angle_p, cam_pivot, radius=cam_radius, device=device)
-            camera_params = torch.cat([cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
-
-            real_imgs_dict = G.synthesis(w_o, camera_params, neural_rendering_resolution=128)
-            fake_imgs_dict = G.synthesis(w_o_, camera_params, neural_rendering_resolution=128)
-            fake_imgs_init_dict = G.synthesis(w_o_copy, camera_params, neural_rendering_resolution=128)
-
-            image_depth_o = real_imgs_dict['image_depth'].squeeze(1)
-            image_depth_f = fake_imgs_dict['image_depth'].squeeze(1)
-            image_depth_f_o = fake_imgs_init_dict['image_depth'].squeeze(1)
-
-            image_normal_o = depth2normal(image_depth_o)
-            image_normal_f = depth2normal(image_depth_f)
-            image_normal_f_o = depth2normal(image_depth_f_o)
-
-            if finetune_id in [0, 1, 3, 5]:
+        if finetune_id in [0, 1, 3, 5]:
+            if norm_loss == 0:
                 loss_normal = torch.nn.L1Loss()(image_normal_o, image_normal_f)
-            elif finetune_id == 4:
-                loss_normal, _ = regionl1n(real_imgs_dict['image'], image_normal_o, image_normal_f_o, image_normal_f, finetune_id)
-            elif finetune_id == 2:
-                loss_normal, _ = regionl1n(real_imgs_dict['image'], image_normal_o, image_normal_f_o, image_normal_f, finetune_id)
             else:
-                loss_normal = 0
+                loss_normal = torch.nn.MSELoss()(image_normal_o, image_normal_f)
+        elif finetune_id == 4:
+            loss_normal, _ = regionl1n(real_imgs_dict['image'], image_normal_o, image_normal_f_o, image_normal_f, finetune_id)
+        elif finetune_id == 2:
+            loss_normal, _ = regionl1n(real_imgs_dict['image'], image_normal_o, image_normal_f_o, image_normal_f, finetune_id)
+        else:
+            loss_normal = 0
 
-            loss, image_mask = regionl1(real_imgs_dict['image'], real_imgs_dict['image'],
-                                            fake_imgs_init_dict['image'], fake_imgs_dict['image'], finetune_id)
+        loss, image_mask = regionl1(real_imgs_dict['image'], real_imgs_dict['image'],
+                                        fake_imgs_init_dict['image'], fake_imgs_dict['image'], finetune_id)
 
-            loss = loss + loss_normal * lambda_normal
+        loss = loss + loss_normal * lambda_normal
 
-            opti_w.zero_grad()
-            loss.backward()
-            opti_w.step()
+        opti_w.zero_grad()
+        loss.backward()
+        opti_w.step()
 
-            if step % 10 == 0:
+        if step % 10 == 0:
 
-                print(f"step: {step} "
-                    f"loss: {loss:.3f}"
-                      f"loss_normal: {loss_normal:.3f}"
-                )
+            print(f"step: {step} "
+                f"loss: {loss:.3f}"
+                  f"loss_normal: {loss_normal:.3f}"
+            )
 
-            if step % 20 == 0:
+        if image_mask.shape[1] == 1:
+            image_mask = image_mask.repeat(1, 3, 1, 1)
+        image_mask = image_mask * 255.0
+        PIL.Image.fromarray(image_mask.permute(0, 2, 3, 1)[0].clamp(0,255).cpu().to(torch.uint8).numpy(), 'RGB').save(f'{outdir}/{finetune_id:04d}_image_mask.png')
 
-                with torch.no_grad():
 
-                    original_img = G.synthesis(w_o, camera_params, neural_rendering_resolution=128)['image']
-                    editing_triot = G.synthesis(w_o_, camera_params, neural_rendering_resolution=128)['image']
-                    editing_init = G.synthesis(w_o_copy, camera_params, neural_rendering_resolution=128)['image']
+    video_name_triot = os.path.join(outdir, '{}_triot.mp4'.format(label_str))
+    video_normal_triot = os.path.join(outdir, '{}_normal_triot.mp4'.format(label_str))
 
-                    original_img = (original_img + 1) * (255 / 2)
-                    editing_init = (editing_init + 1) * (255 / 2)
-                    editing_triot = (editing_triot + 1) * (255 / 2)
+    video_name_init = os.path.join(outdir, '{}_init.mp4'.format(label_str))
+    video_normal_init = os.path.join(outdir, '{}_normal_init.mp4'.format(label_str))
+    video_name_o = os.path.join(outdir, '0_0_0.mp4')
+    video_normal_o = os.path.join(outdir, '{}_normal_o.mp4'.format(label_str))
 
-                    PIL.Image.fromarray(original_img.permute(0, 2, 3, 1)[0].clamp(0,255).cpu().to(torch.uint8).numpy(), 'RGB').save(f'{outdir_}/{step:04d}_orginal.png')
-                    PIL.Image.fromarray(editing_init.permute(0, 2, 3, 1)[0].clamp(0,255).cpu().to(torch.uint8).numpy(), 'RGB').save(f'{outdir_}/{step:04d}_editing_init.png')
-                    PIL.Image.fromarray(editing_triot.permute(0, 2, 3, 1)[0].clamp(0,255).cpu().to(torch.uint8).numpy(), 'RGB').save(f'{outdir_}/{step:04d}_editing_triot.png')
+    video_triot = imageio.get_writer(video_name_triot, mode='I', fps=60, codec='libx264')
+    video_init = imageio.get_writer(video_name_init, mode='I', fps=60, codec='libx264')
+    video_o = imageio.get_writer(video_name_o, mode='I', fps=60, codec='libx264')
+    video_normal_o = imageio.get_writer(video_normal_o, mode='I', fps=60, codec='libx264')
+    video_normal_init = imageio.get_writer(video_normal_init, mode='I', fps=60, codec='libx264')
+    video_normal_triot = imageio.get_writer(video_normal_triot, mode='I', fps=60, codec='libx264')
 
-                    if finetune_id != 1:
 
-                        if image_mask.shape[1] == 1:
+    w_frames = 120
+    max_batch = 100000
+    voxel_resolution = 128
+    psi = 0.7
+    camera_lookat_point = torch.tensor([0, 0, 0.2], device=device)
 
-                            image_mask = image_mask.repeat(1, 3, 1, 1)
-                        image_mask = image_mask * 255.0
-                        PIL.Image.fromarray(image_mask.permute(0, 2, 3, 1)[0].clamp(0,255).cpu().to(torch.uint8).numpy(), 'RGB').save(f'{outdir_}/{finetune_id:04d}_image_mask.png')
+    for frame_idx in tqdm(range(w_frames)):
 
-        video_name_triot = os.path.join(outdir_, '{}_triot.mp4'.format(label_str))
-        video_normal_triot = os.path.join(outdir_, '{}_normal_triot.mp4'.format(label_str))
-        video_name_init = os.path.join(outdir_, '{}_init.mp4'.format(label_str))
-        video_normal_init = os.path.join(outdir_, '{}_normal_init.mp4'.format(label_str))
-        video_name_o = os.path.join(outdir_, '0_0_0.mp4')
-        video_normal_o = os.path.join(outdir_, '{}_normal_o.mp4'.format(label_str))
+        pitch_range = 0.25
+        yaw_range = 0.35
+        # cam2world_pose = LookAtPoseSampler.sample(
+        #     3.14 / 2 + yaw_range * np.sin(2 * 3.14 * frame_idx / (w_frames)),
+        #     3.14 / 2 - 0.05 + pitch_range * np.cos(2 * 3.14 * frame_idx / (w_frames)),
+        #     camera_lookat_point, radius=2.7, device=device)
 
-        video_triot = imageio.get_writer(video_name_triot, mode='I', fps=60, codec='libx264')
-        video_init = imageio.get_writer(video_name_init, mode='I', fps=60, codec='libx264')
-        video_o = imageio.get_writer(video_name_o, mode='I', fps=60, codec='libx264')
-        video_normal_o = imageio.get_writer(video_normal_o, mode='I', fps=60, codec='libx264')
-        video_normal_init = imageio.get_writer(video_normal_init, mode='I', fps=60, codec='libx264')
-        video_normal_triot = imageio.get_writer(video_normal_triot, mode='I', fps=60, codec='libx264')
+        cam2world_pose = LookAtPoseSampler.sample(
+            3.14 / 2 + yaw_range * np.sin(2 * 3.14 * frame_idx / (w_frames)), 3.14 / 2 - 0.05,
+            camera_lookat_point, radius=2.7, device=device)
 
-        w_frames = 120
-        max_batch = 100000
-        voxel_resolution = 128
-        psi = 0.7
-        camera_lookat_point = torch.tensor([0, 0, 0.2], device=device)
+        intrinsics = torch.tensor([[4.2647, 0, 0.5], [0, 4.2647, 0.5], [0, 0, 1]], device=device)
+        c = torch.cat([cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
 
-        for frame_idx in tqdm(range(w_frames)):
+        img = G.synthesis(ws=w_o_, c=c, noise_mode='const')['image'][0]
+        img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+        video_triot.append_data(img.permute(1, 2, 0).cpu().numpy())
 
-            pitch_range = 0.25
-            yaw_range = 0.35
-            # cam2world_pose = LookAtPoseSampler.sample(
-            #     3.14 / 2 + yaw_range * np.sin(2 * 3.14 * frame_idx / (w_frames)),
-            #     3.14 / 2 - 0.05 + pitch_range * np.cos(2 * 3.14 * frame_idx / (w_frames)),
-            #     camera_lookat_point, radius=2.7, device=device)
+        img = G.synthesis(ws=w_o_copy, c=c, noise_mode='const')['image'][0]
+        img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+        video_init.append_data(img.permute(1, 2, 0).cpu().numpy())
 
-            cam2world_pose = LookAtPoseSampler.sample(
-                3.14 / 2 + yaw_range * np.sin(2 * 3.14 * frame_idx / (w_frames)), 3.14 / 2 - 0.05,
-                camera_lookat_point, radius=2.7, device=device)
+        img = G.synthesis(ws=w_o, c=c, noise_mode='const')['image'][0]
+        img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+        video_o.append_data(img.permute(1, 2, 0).cpu().numpy())
 
-            intrinsics = torch.tensor([[4.2647, 0, 0.5], [0, 4.2647, 0.5], [0, 0, 1]], device=device)
-            c = torch.cat([cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
+        img = G.synthesis(ws=w_o, c=c, noise_mode='const')['image_depth']
+        normal_o = depth2normal(img.squeeze(1))
+        normal_o = (normal_o.clamp(0, 1) * 255.0).to('cpu', torch.uint8).numpy()
+        video_normal_o.append_data(normal_o[0])
 
-            img = G.synthesis(ws=w_o_, c=c, noise_mode='const')['image'][0]
-            img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-            video_triot.append_data(img.permute(1, 2, 0).cpu().numpy())
+        img = G.synthesis(ws=w_o_copy, c=c, noise_mode='const')['image_depth']
+        normal_init = depth2normal(img.squeeze(1))
+        normal_init = (normal_init.clamp(0, 1) * 255.0).to('cpu', torch.uint8).numpy()
+        video_normal_init.append_data(normal_init[0])
 
-            img = G.synthesis(ws=w_o_copy, c=c, noise_mode='const')['image'][0]
-            img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-            video_init.append_data(img.permute(1, 2, 0).cpu().numpy())
-
-            img = G.synthesis(ws=w_o, c=c, noise_mode='const')['image'][0]
-            img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-            video_o.append_data(img.permute(1, 2, 0).cpu().numpy())
-
-            img = G.synthesis(ws=w_o, c=c, noise_mode='const')['image_depth']
-            normal_o = depth2normal(img.squeeze(1))
-            normal_o = (normal_o.clamp(0, 1) * 255.0).to('cpu', torch.uint8).numpy()
-            video_normal_o.append_data(normal_o[0])
-
-            img = G.synthesis(ws=w_o_copy, c=c, noise_mode='const')['image_depth']
-            normal_init = depth2normal(img.squeeze(1))
-            normal_init = (normal_init.clamp(0, 1) * 255.0).to('cpu', torch.uint8).numpy()
-            video_normal_init.append_data(normal_init[0])
-
-            img = G.synthesis(ws=w_o_, c=c, noise_mode='const')['image_depth']
-            normal_triot = depth2normal(img.squeeze(1))
-            normal_triot = (normal_triot.clamp(0, 1) * 255.0).to('cpu', torch.uint8).numpy()
-            video_normal_triot.append_data(normal_triot[0])
-
-        if output_shape:
-
-            if finetune_id == 0:
-                w_name = ['w_o_', 'w_o']
-                w_objects = [w_o_, w_o]
-            else:
-                w_name = ['w_o_']
-                w_objects = [w_o_]
-            for k, w in enumerate(w_objects):
-
-                samples, voxel_origin, voxel_size = create_samples(N=voxel_resolution, voxel_origin=[0, 0, 0],
-                                                                   cube_length=G.rendering_kwargs['box_warp'])
-                samples = samples.to(device)
-                sigmas = torch.zeros((samples.shape[0], samples.shape[1], 1), device=device)
-                transformed_ray_directions_expanded = torch.zeros((samples.shape[0], max_batch, 3), device=device)
-                transformed_ray_directions_expanded[..., -1] = -1
-
-                head = 0
-                with tqdm(total=samples.shape[1]) as pbar:
-                    with torch.no_grad():
-                        while head < samples.shape[1]:
-                            torch.manual_seed(0)
-                            sigma = G.sample_mixed(samples[:, head:head + max_batch],
-                                                   transformed_ray_directions_expanded[:, :samples.shape[1] - head],
-                                                   w, truncation_psi=psi, noise_mode='const')['sigma']
-                            sigmas[:, head:head + max_batch] = sigma
-                            head += max_batch
-                            pbar.update(max_batch)
-
-                sigmas = sigmas.reshape((voxel_resolution, voxel_resolution, voxel_resolution)).cpu().numpy()
-                sigmas = np.flip(sigmas, 0)
-
-                pad = int(30 * voxel_resolution / 256)
-                pad_top = int(38 * voxel_resolution / 256)
-                sigmas[:pad] = 0
-                sigmas[-pad:] = 0
-                sigmas[:, :pad] = 0
-                sigmas[:, -pad_top:] = 0
-                sigmas[:, :, :pad] = 0
-                sigmas[:, :, -pad:] = 0
-
-                output_ply = True
-                if output_ply:
-                    from shape_utils import convert_sdf_samples_to_ply
-                    convert_sdf_samples_to_ply(np.transpose(sigmas, (2, 1, 0)), [0, 0, 0], 1,
-                                               os.path.join(outdir_, '{}_{}_shape.ply'.format(label_str, w_name[k])), level=10)
-                else:  # output mrc
-                    with mrcfile.new_mmap(outdir_ + f'{0:04d}_shape.mrc', overwrite=True, shape=sigmas.shape,
-                                          mrc_mode=2) as mrc:
-                        mrc.data[:] = sigmas
-
-        video_triot.close()
-        video_init.close()
-        video_o.close()
-
-        original_label = original_label + random_label
-        w_o = w_o_
+        img = G.synthesis(ws=w_o_, c=c, noise_mode='const')['image_depth']
+        normal_triot = depth2normal(img.squeeze(1))
+        normal_triot = (normal_triot.clamp(0, 1) * 255.0).to('cpu', torch.uint8).numpy()
+        video_normal_triot.append_data(normal_triot[0])
+    video_triot.close()
+    video_init.close()
+    video_o.close()
 
 
 #----------------------------------------------------------------------------
@@ -600,6 +544,10 @@ if __name__ == "__main__":
                         type=str, default = '')
     parser.add_argument('--flow_modules', type=str, help='Gen shapes for shape interpolation', default='512-512-512-512-512')
 
+    parser.add_argument('--mask_path', help='mask path', type=str, default= '/nfs/data_chaos/jzhang/results/4_15/masks')
+
+    parser.add_argument('--norm_loss', help='norm loss id', type=int, default = 0)
+
     args = parser.parse_args()
 
     G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict())
@@ -658,7 +606,6 @@ if __name__ == "__main__":
     G_kwargs.num_fp16_res = args.g_num_fp16_res
     G_kwargs.conv_clamp = 256 if args.g_num_fp16_res > 0 else None
 
-
     D_kwargs.block_kwargs.freeze_layers = args.freezed
     D_kwargs.epilogue_kwargs.mbstd_group_size = None
     D_kwargs.class_name = 'training.dual_discriminator.DualDiscriminator'
@@ -677,11 +624,10 @@ if __name__ == "__main__":
                      label_image_recon = args.label_image_recon
                      )
 
-    print('haha', args.dataset_path)
-
     training_steps(args.network_pkl, args.truncation_psi, args.latent_dir, args.outdir, args.num_steps, args.fov_deg,
                    args.model_size, args.dataset_path, args.csvpath, common_kwargs,
                    G_kwargs, D_kwargs, loss_dict, args.output_shape,
-                   args.finetune_id, args.scale, args.file_id, cnf_path=args.cnf_path, flow_modules=args.flow_modules, lambda_normal=args.lambda_normal) # pylint: disable=no-value-for-parameter
+                   args.finetune_id, args.scale, args.file_id, cnf_path=args.cnf_path, flow_modules=args.flow_modules,
+                   lambda_normal=args.lambda_normal, mask_path=args.mask_path, norm_loss=args.norm_loss)
 
 #----------------------------------------------------------------------------

@@ -42,6 +42,7 @@ class CNF(nn.Module):
 
         if regularization_fns is not None and len(regularization_fns) > 0:
             raise NotImplementedError("Regularization not supported")
+
         self.use_adjoint = use_adjoint
         self.odefunc = odefunc
         self.solver = solver
@@ -54,6 +55,7 @@ class CNF(nn.Module):
         self.conditional = conditional
 
     def forward(self, x, context=None, logpx=None, integration_times=None, reverse=False):
+
         if logpx is None:
             _logpx = torch.zeros(*x.shape[:-1], 1).to(x)
         else:
@@ -62,6 +64,7 @@ class CNF(nn.Module):
         if self.conditional:
             assert context is not None
             states = (x, _logpx, context)
+
             atol = self.atol  # [self.atol] * 3
             rtol = self.rtol  # [self.rtol] * 3
         else:
@@ -84,7 +87,9 @@ class CNF(nn.Module):
         # Refresh the odefunc statistics.
         self.odefunc.before_odeint()
         odeint = odeint_adjoint if self.use_adjoint else odeint_normal
+
         if self.training:
+
             state_t = odeint(
                 self.odefunc,
                 states,
@@ -94,7 +99,9 @@ class CNF(nn.Module):
                 method=self.solver,
                 options=self.solver_options,
             )
+
         else:
+
             state_t = odeint(
                 self.odefunc,
                 states,

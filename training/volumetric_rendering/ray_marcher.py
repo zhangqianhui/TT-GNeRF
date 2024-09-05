@@ -28,7 +28,6 @@ class MipRayMarcher2(nn.Module):
         densities_mid = (densities[:, :, :-1] + densities[:, :, 1:]) / 2
         depths_mid = (depths[:, :, :-1] + depths[:, :, 1:]) / 2
 
-
         if rendering_options['clamp_mode'] == 'softplus':
             densities_mid = F.softplus(densities_mid - 1) # activation bias of -1 makes things initialize better
         else:

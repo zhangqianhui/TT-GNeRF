@@ -19,25 +19,42 @@ import numpy as np
 import PIL.Image
 import torch
 from tqdm import tqdm
-import mrcfile
-import cv2
 from torch.nn import functional as F
 import functools
 import imageio
 import legacy
 from camera_utils import LookAtPoseSampler, FOV_to_intrinsics
 from torch_utils import misc
-from training.triplane import TriPlaneGenerator
-from training.dual_discriminator import DualDiscriminator, depth2normal
 import lpips
-from torchvision import transforms, utils
-from dataset import FFHQFake
 from torch.utils import data
 import copy
 from torch import autograd
+from criteria.id_loss import IDLoss
 
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-# ----------------------------------------------------------------------------
+def gradient_torch(pred):
+
+    D_dy1 = pred[:, 1:2, :] - pred[:, 0:1, :]
+    D_dy = (pred[:, 2:, :] - pred[:, :-2, :]) / 2
+    D_dy2 = pred[:, -1:, :] - pred[:, -2:-1, :]
+    D_dy = torch.cat([D_dy1, D_dy, D_dy2], dim=1)
+
+    D_dx1 = pred[:, :, 1:2] - pred[:, :, 0:1]
+    D_dx = (pred[:, :, 2:] - pred[:, :, :-2]) / 2
+    D_dx2 = pred[:, :, -1:] - pred[:, :, -2:-1]
+    D_dx = torch.cat([D_dx1, D_dx, D_dx2], dim=2)
+
+    return D_dx, D_dy
+
+def depth2normal(depth):
+
+    dx, dy = gradient_torch(depth * 255.0)
+    normal = torch.stack([-dx, -dy, torch.ones_like(dx).to(depth.device)], -1)
+    normal = normal / (((normal ** 2).sum(3, keepdim=True)) ** 0.5 + 1e-7)
+    normal = (normal + 1) / 2.0
+
+    return normal
 
 def parse_range(s: Union[str, List]) -> List[int]:
     '''Parse a comma separated list of numbers or ranges and return a list of ints.
@@ -216,7 +233,9 @@ def training_steps(
         loss_dict,
         w_dir,
         id,
-        ref_id
+        ref_id,
+        text_prompts,
+        faceid_weights
 ):
 
     device = torch.device('cuda')
@@ -226,7 +245,7 @@ def training_steps(
     G_ema = copy.deepcopy(G).eval()
     G2 = copy.deepcopy(G)
 
-    outdir = outdir + '_' + str(id) + '_' + str(ref_id)
+    outdir = outdir + '_' + str(id) + '_' + str(ref_id) + 'v3'
 
     if not os.path.exists(outdir):
         os.mkdir(outdir)
@@ -235,7 +254,6 @@ def training_steps(
     ws = torch.from_numpy(w).to(device)
 
     w_ref = np.load(os.path.join(w_dir, '{:0>4d}_ws.npy'.format(ref_id)))
-    print('w_ref', w_ref.shape)
     ws_ref = torch.from_numpy(w_ref).to(device)
 
     ws_ref_copy = ws_ref.clone().detach()
@@ -261,11 +279,11 @@ def training_steps(
             trainable_parameters.append(params)
 
     loss_fn_alex = lpips.LPIPS(net='alex').to(device)
+    idloss = IDLoss(faceid_weights)
 
     initial_learning_rate = 0.005
-    opti_G = torch.optim.Adam([{'params': ws_ref}], betas=(0.9, 0.999), lr=initial_learning_rate)
+    opti_G = torch.optim.Adam([{'params': ws_ref}] + [{'params':trainable_parameters}], betas=(0.9, 0.999), lr=initial_learning_rate)
     num_steps = num_steps
-
     intrinsics = FOV_to_intrinsics(fov_deg, device=device)
 
     for step in range(num_steps):
@@ -284,71 +302,110 @@ def training_steps(
 
         loss_normal = torch.nn.L1Loss()(real_ref_imgs_dict['image_depth'], ref_imgs_dict['image_depth'])
         loss_appear = loss_fn_alex(real_imgs_dict['image'], ref_imgs_dict['image']).mean()
-        g_loss = loss_appear + 10 * loss_normal
+        id_loss = idloss(ref_imgs_dict['image'], real_imgs_dict['image'])[0]
+
+        g_loss = 10 * loss_normal + loss_appear + id_loss
 
         opti_G.zero_grad()
         g_loss.backward()
         opti_G.step()
 
         if step % 10 == 0:
-            print(f"step: {step} " f"g_loss: {g_loss:.3f} ")
+            print(f"step: {step} " f"g_loss: {g_loss.item():.3f} " f"clip_loss ")
 
-        if step % 50 == 0:
-
-            with torch.no_grad():
-
-                ref_img = G.synthesis(ws_ref_copy, camera_params, neural_rendering_resolution=128)['image']
-                ref_img_editing = G2.synthesis(ws_ref, camera_params, neural_rendering_resolution=128)['image']
-                real_img = G.synthesis(ws, camera_params, neural_rendering_resolution=128)['image']
-                real_depth = G.synthesis(ws, camera_params, neural_rendering_resolution=128)['image_depth']
-
-                normal = depth2normal(real_depth.squeeze(1))
-
-                real_img = (real_img + 1) * (255 / 2)
-                ref_img_editing = (ref_img_editing + 1) * (255 / 2)
-                ref_img = (ref_img + 1) * (255 / 2)
-
-                normal = normal * 255.0
-
-                PIL.Image.fromarray(real_img.permute(0, 2, 3, 1)[0].clamp(0, 255).cpu().to(torch.uint8).numpy(),
-                                    'RGB').save(f'{outdir}/{step:04d}_real.png')
-
-                PIL.Image.fromarray(ref_img_editing.permute(0, 2, 3, 1)[0].clamp(0, 255).cpu().to(torch.uint8).numpy(),
-                                    'RGB').save(f'{outdir}/{step:04d}_real_img_editing.png')
-
-                PIL.Image.fromarray(ref_img.permute(0, 2, 3, 1)[0].clamp(0, 255).cpu().to(torch.uint8).numpy(),
-                                    'RGB').save(f'{outdir}/{step:04d}_ref_img.png')
-
-                PIL.Image.fromarray(normal[0].clamp(0, 255).cpu().to(torch.uint8).numpy(), 'RGB').save(
-                    f'{outdir}/{step:04d}_normal.png')
+        # if step % 50 == 0:
+        #
+        #     with torch.no_grad():
+        #
+        #         ref_img = G.synthesis(ws_ref_copy, camera_params, neural_rendering_resolution=128)['image']
+        #         ref_img_editing = G2.synthesis(ws_ref, camera_params, neural_rendering_resolution=128)['image']
+        #         real_img = G.synthesis(ws, camera_params, neural_rendering_resolution=128)['image']
+        #         real_depth = G.synthesis(ws, camera_params, neural_rendering_resolution=128)['image_depth']
+        #
+        #         normal = depth2normal(real_depth.squeeze(1))
+        #
+        #         real_img = (real_img + 1) * (255 / 2)
+        #         ref_img_editing = (ref_img_editing + 1) * (255 / 2)
+        #         ref_img = (ref_img + 1) * (255 / 2)
+        #
+        #         normal = normal * 255.0
+        #
+        #         PIL.Image.fromarray(real_img.permute(0, 2, 3, 1)[0].clamp(0, 255).cpu().to(torch.uint8).numpy(),
+        #                             'RGB').save(f'{outdir}/{step:04d}_real.png')
+        #
+        #         PIL.Image.fromarray(ref_img_editing.permute(0, 2, 3, 1)[0].clamp(0, 255).cpu().to(torch.uint8).numpy(),
+        #                             'RGB').save(f'{outdir}/{step:04d}_real_img_editing.png')
+        #
+        #         PIL.Image.fromarray(ref_img.permute(0, 2, 3, 1)[0].clamp(0, 255).cpu().to(torch.uint8).numpy(),
+        #                             'RGB').save(f'{outdir}/{step:04d}_ref_img.png')
+        #
+        #         PIL.Image.fromarray(normal[0].clamp(0, 255).cpu().to(torch.uint8).numpy(), 'RGB').save(
+        #             f'{outdir}/{step:04d}_normal.png')
 
     video_name_o = os.path.join(outdir, '{}.mp4'.format('original'))
+    video_name_normal_o = os.path.join(outdir, '{}.mp4'.format('original_normal'))
     video_name_ref = os.path.join(outdir, '{}.mp4'.format('ref'))
+    video_name_normal_ref = os.path.join(outdir, '{}.mp4'.format('ref_normal'))
     video_name_editing = os.path.join(outdir, '{}.mp4'.format('editing'))
+    video_name_normal_editing = os.path.join(outdir, '{}.mp4'.format('editing_normal'))
+    #video_name_mesh_editing = os.path.join(outdir, '{}_mesh_triot.mp4'.format('editing_mesh'))
 
     video_out_o = imageio.get_writer(video_name_o, mode='I', fps=60, codec='libx264')
+    video_out_o_normal = imageio.get_writer(video_name_normal_o, mode='I', fps=60, codec='libx264')
     video_out_ref = imageio.get_writer(video_name_ref, mode='I', fps=60, codec='libx264')
+    video_out_ref_normal = imageio.get_writer(video_name_normal_ref, mode='I', fps=60, codec='libx264')
     video_out_editing = imageio.get_writer(video_name_editing, mode='I', fps=60, codec='libx264')
+    video_out_editing_normal = imageio.get_writer(video_name_normal_editing, mode='I', fps=60, codec='libx264')
 
-    all_poses = []
 
     w_frames = 60
-    for frame_idx in tqdm(range(60)):
+    # Generate video trajectory
+    trajectory = np.zeros((60, 3), dtype=np.float32)
+
+    # set camera trajectory
+    # sweep azimuth angles (4 seconds)
+    t = np.linspace(0, 1, w_frames)
+    fov = 18.837  # + 1 * np.sin(t * 2 * np.pi)
+
+    elev = 0.0 / 2 + 0.0 / 2 * np.sin(t * 2 * np.pi)
+    azim = 0.0 * np.cos(t * 2 * np.pi)
+
+    trajectory[:w_frames, 0] = azim
+    trajectory[:w_frames, 1] = elev
+    trajectory[:w_frames, 2] = fov
+
+    trajectory = torch.from_numpy(trajectory).to(device)
+    all_poses = []
+
+    for frame_idx in tqdm(range(w_frames)):
 
         pitch_range = 0.25
         yaw_range = 0.35
 
         cam2world_pose = LookAtPoseSampler.sample(
-            3.14 / 2 + yaw_range * np.sin(2 * 3.14 * frame_idx / (w_frames)),
-            3.14 / 2 - 0.05 + pitch_range * np.cos(2 * 3.14 * frame_idx / (w_frames)),
+            3.14 / 2 + yaw_range * np.sin(2 * 3.14 * frame_idx / (w_frames)), 3.14 / 2 - 0.05,
             camera_lookat_point, radius=2.7, device=device)
+
+
         all_poses.append(cam2world_pose.squeeze().cpu().numpy())
         intrinsics = torch.tensor([[4.2647, 0, 0.5], [0, 4.2647, 0.5], [0, 0, 1]], device=device)
         c = torch.cat([cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
 
         img_o = G.synthesis(ws=ws, c=c, noise_mode='const', neural_rendering_resolution=128)['image']
+        img_depth_o = G.synthesis(ws=ws, c=c, noise_mode='const', neural_rendering_resolution=128)['image_depth']
+        normal_o = depth2normal(img_depth_o.squeeze(1))
+        normal_o = (normal_o.clamp(0, 1) * 255.0).to('cpu', torch.uint8).numpy()
+
         img_edit = G2.synthesis(ws=ws_ref, c=c, noise_mode='const', neural_rendering_resolution=128)['image']
+        img_depth_edit = G2.synthesis(ws=ws_ref, c=c, noise_mode='const', neural_rendering_resolution=128)['image_depth']
+        normal_edit = depth2normal(img_depth_edit.squeeze(1))
+        normal_edit = (normal_edit.clamp(0, 1) * 255.0).to('cpu', torch.uint8).numpy()
+
         img_ref = G2.synthesis(ws=ws_ref_copy, c=c, noise_mode='const', neural_rendering_resolution=128)['image']
+        img_depth_ref = G2.synthesis(ws=ws_ref_copy, c=c, noise_mode='const', neural_rendering_resolution=128)['image_depth']
+        normal_ref = depth2normal(img_depth_ref.squeeze(1))
+        normal_ref = (normal_ref.clamp(0, 1) * 255.0).to('cpu', torch.uint8).numpy()
+
         img_o = (img_o * 127.5 + 128).clamp(0, 255).to(torch.uint8)
         img_edit = (img_edit * 127.5 + 128).clamp(0, 255).to(torch.uint8)
         img_ref = (img_ref * 127.5 + 128).clamp(0, 255).to(torch.uint8)
@@ -356,6 +413,10 @@ def training_steps(
         video_out_o.append_data(img_o[0].permute(1, 2, 0).cpu().numpy())
         video_out_editing.append_data(img_edit[0].permute(1, 2, 0).cpu().numpy())
         video_out_ref.append_data(img_ref[0].permute(1, 2, 0).cpu().numpy())
+
+        video_out_o_normal.append_data(normal_o[0])
+        video_out_editing_normal.append_data(normal_edit[0])
+        video_out_ref_normal.append_data(normal_ref[0])
 
     video_out_o.close()
     video_out_editing.close()
@@ -366,7 +427,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="EG3D inversion")
     parser.add_argument("--network_pkl", type=str,
-                        default='',
+                        default='/nfs/data_chaos/jzhang/dataset/pretrained/eg3d/ffhq512-128.pkl',
                         help="path to the network pkl")
     parser.add_argument("--outdir", type=str, default='./outputs/', help="path to the lmdb dataset")
     parser.add_argument("--w_dir", type=str, default='./outputs/', help="the save w path")
@@ -379,6 +440,9 @@ if __name__ == "__main__":
     parser.add_argument("--model_size", type=int, default=512, help="model size")
     parser.add_argument("--dataset_path", type=str, default='./training_data_40000', help="path to the dataset path")
     parser.add_argument("--csvpath", type=str, default='./training_data_40000', help="path to csv file")
+    parser.add_argument("--promopts", type=str, default='', help="prompts")
+    parser.add_argument("--faceid_weights", type=str, default='', help="path for faceid pretraind model")
+
     parser.add_argument("--resolution", type=int, default=512, help="resolution")
     parser.add_argument('--gen_pose_cond', help='If true, enable generator pose conditioning.', type=bool, default=True)
     parser.add_argument('--gpc_reg_prob',
@@ -505,5 +569,5 @@ if __name__ == "__main__":
     training_steps(args.network_pkl, args.batch, args.truncation_psi, args.trunccutoff, args.outdir, args.num_steps,
                    args.fov_deg,
                    args.model_size, args.dataset_path, args.csvpath, common_kwargs, G_kwargs,
-                   loss_dict, args.w_dir, args.id, args.ref_id)  # pylint: disable=no-value-for-parameter
+                   loss_dict, args.w_dir, args.id, args.ref_id, args.promopts, args.faceid_weights)  # pylint: disable=no-value-for-parameter
 # ----------------------------------------------------------------------------

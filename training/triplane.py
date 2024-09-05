@@ -58,7 +58,44 @@ class TriPlaneGenerator(torch.nn.Module):
         w_ = self.style_editing(label, w)
         return w_
 
+    def synthesis_exchange(self, ws, c, neural_rendering_resolution=None, update_emas=False, cache_backbone=False, use_cached_backbone=False, **synthesis_kwargs):
+
+        cam2world_matrix = c[:, :16].view(-1, 4, 4)
+        intrinsics = c[:, 16:25].view(-1, 3, 3)
+
+        if neural_rendering_resolution is None:
+            neural_rendering_resolution = self.neural_rendering_resolution
+        else:
+            self.neural_rendering_resolution = neural_rendering_resolution
+
+        # Create a batch of rays for volume rendering
+        ray_origins, ray_directions = self.ray_sampler(cam2world_matrix, intrinsics, neural_rendering_resolution)
+
+        # Create triplanes by running StyleGAN backbone
+        N, M, _ = ray_origins.shape
+
+        planes = self.backbone.synthesis(ws, update_emas=update_emas, **synthesis_kwargs)
+
+        # Reshape output into three 32-channel planes
+        planes = planes.view(len(planes), 3, 32, planes.shape[-2], planes.shape[-1])
+
+        # Perform volume rendering
+        feature_samples, depth_samples, weights_samples, xyz = self.renderer.forward_exchange(planes, self.decoder, ray_origins, ray_directions, self.rendering_kwargs) # channels last
+
+        # Reshape into 'raw' neural-rendered image
+        H = W = self.neural_rendering_resolution
+        feature_image = feature_samples.permute(0, 2, 1).reshape(N, feature_samples.shape[-1], H, W).contiguous()
+        #heatmaps2d = heatmaps2d.permute(0, 2, 1).reshape(N, heatmaps2d.shape[-1], H, W).contiguous()
+        depth_image = depth_samples.permute(0, 2, 1).reshape(N, 1, H, W)
+
+        rgb_image = feature_image[:, :3]
+        sr_image = self.superresolution(rgb_image, feature_image, ws, noise_mode=self.rendering_kwargs['superresolution_noise_mode'], **{k:synthesis_kwargs[k] for k in synthesis_kwargs.keys() if k != 'noise_mode'})
+
+        return {'image': sr_image, 'image_raw': rgb_image, 'image_depth': depth_image,
+                'feature_image': feature_image, 'xyz': xyz}
+
     def synthesis(self, ws, c, neural_rendering_resolution=None, update_emas=False, cache_backbone=False, use_cached_backbone=False, **synthesis_kwargs):
+
         cam2world_matrix = c[:, :16].view(-1, 4, 4)
         intrinsics = c[:, 16:25].view(-1, 3, 3)
 
@@ -88,13 +125,15 @@ class TriPlaneGenerator(torch.nn.Module):
         # Reshape into 'raw' neural-rendered image
         H = W = self.neural_rendering_resolution
         feature_image = feature_samples.permute(0, 2, 1).reshape(N, feature_samples.shape[-1], H, W).contiguous()
+
+        #heatmaps2d = heatmaps2d.permute(0, 2, 1).reshape(N, heatmaps2d.shape[-1], H, W).contiguous()
         depth_image = depth_samples.permute(0, 2, 1).reshape(N, 1, H, W)
 
-        # Run superresolution to get final image
         rgb_image = feature_image[:, :3]
         sr_image = self.superresolution(rgb_image, feature_image, ws, noise_mode=self.rendering_kwargs['superresolution_noise_mode'], **{k:synthesis_kwargs[k] for k in synthesis_kwargs.keys() if k != 'noise_mode'})
 
-        return {'image': sr_image, 'image_raw': rgb_image, 'image_depth': depth_image}
+        return {'image': sr_image, 'image_raw': rgb_image, 'image_depth': depth_image,
+                'feature_image': feature_image}
     
     def sample(self, coordinates, directions, z, c, truncation_psi=1, truncation_cutoff=None, update_emas=False, **synthesis_kwargs):
         # Compute RGB features, density for arbitrary 3D coordinates. Mostly used for extracting shapes. 

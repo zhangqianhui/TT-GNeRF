@@ -2,7 +2,6 @@ from .odefunc import ODEfunc, ODEnet
 from .normalization import MovingBatchNorm1d
 from .cnf import CNF, SequentialFlow
 
-
 def count_nfe(model):
     class AccNumEvals(object):
 
@@ -21,7 +20,6 @@ def count_nfe(model):
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-
 def count_total_time(model):
     class Accumulator(object):
 
@@ -36,9 +34,9 @@ def count_total_time(model):
     model.apply(accumulator)
     return accumulator.total_time
 
-
-def build_model( input_dim, hidden_dims, context_dim, num_blocks, conditional):
+def build_model(input_dim, hidden_dims, context_dim, num_blocks, conditional):
     def build_cnf():
+
         diffeq = ODEnet(
             hidden_dims=hidden_dims,
             input_shape=(input_dim,),
@@ -75,6 +73,7 @@ def build_model( input_dim, hidden_dims, context_dim, num_blocks, conditional):
 
 
 def cnf(input_dim,dims,zdim,num_blocks):
+
     dims = tuple(map(int, dims.split("-")))
     model = build_model(input_dim, dims, zdim, num_blocks, True).cuda()
     print("Number of trainable parameters of Point CNF: {}".format(count_parameters(model)))

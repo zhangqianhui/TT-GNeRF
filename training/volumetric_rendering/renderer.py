@@ -16,7 +16,7 @@ ray, and computes pixel colors using the volume rendering equation.
 import math
 import torch
 import torch.nn as nn
-
+from kmeans.factor_catalog_3D import FactorCatalog
 from training.volumetric_rendering.ray_marcher import MipRayMarcher2
 from training.volumetric_rendering import math_utils
 
@@ -85,6 +85,9 @@ class ImportanceRenderer(torch.nn.Module):
         self.ray_marcher = MipRayMarcher2()
         self.plane_axes = generate_planes()
 
+        # self.catalog = FactorCatalog(10, random_state=10, batch_size=100,
+        #                         n_init=3)
+
     def forward(self, planes, decoder,ray_origins , ray_directions, rendering_options):
         self.plane_axes = self.plane_axes.to(ray_origins.device)
 
@@ -104,7 +107,6 @@ class ImportanceRenderer(torch.nn.Module):
         # Coarse Pass
         sample_coordinates = (ray_origins.unsqueeze(-2) + depths_coarse * ray_directions.unsqueeze(-2)).reshape(batch_size, -1, 3)
         sample_directions = ray_directions.unsqueeze(-2).expand(-1, -1, samples_per_ray, -1).reshape(batch_size, -1, 3)
-
 
         out = self.run_model(planes, decoder, sample_coordinates, sample_directions, rendering_options)
         colors_coarse = out['rgb']
@@ -132,13 +134,77 @@ class ImportanceRenderer(torch.nn.Module):
                                                                   depths_fine, colors_fine, densities_fine)
 
             sample_coordinates_ = torch.cat([sample_coordinates_, sample_coordinates], dim=2)
+
+            # heatmap_ml_3D = self.catalog.fit_predict(all_colors[...,0:3].cpu(), raw=True)
+            # heatmaps_3D = heatmap_ml_3D.get(10).to(all_depths)
+
             # Aggregate
             rgb_final, depth_final, weights, xyz = self.ray_marcher(all_colors, all_densities, all_depths, rendering_options, sample_coordinates_)
+            #heatmaps2D, _, _, _ = self.ray_marcher(heatmaps_3D, all_densities, all_depths, rendering_options, sample_coordinates_)
+
         else:
             rgb_final, depth_final, weights, xyz = self.ray_marcher(colors_coarse, densities_coarse, depths_coarse, rendering_options, sample_coordinates)
 
+        return rgb_final, depth_final, weights.sum(2)
+
+    def forward_exchange(self, planes, decoder,ray_origins , ray_directions, rendering_options):
+
+        self.plane_axes = self.plane_axes.to(ray_origins.device)
+        if rendering_options['ray_start'] == rendering_options['ray_end'] == 'auto':
+            ray_start, ray_end = math_utils.get_ray_limits_box(ray_origins, ray_directions, box_side_length=rendering_options['box_warp'])
+            is_ray_valid = ray_end > ray_start
+            if torch.any(is_ray_valid).item():
+                ray_start[~is_ray_valid] = ray_start[is_ray_valid].min()
+                ray_end[~is_ray_valid] = ray_start[is_ray_valid].max()
+            depths_coarse = self.sample_stratified(ray_origins, ray_start, ray_end, rendering_options['depth_resolution'], rendering_options['disparity_space_sampling'])
+        else:
+            # Create stratified depth samples
+            depths_coarse = self.sample_stratified(ray_origins, rendering_options['ray_start'], rendering_options['ray_end'], rendering_options['depth_resolution'], rendering_options['disparity_space_sampling'])
+
+        batch_size, num_rays, samples_per_ray, _ = depths_coarse.shape
+
+        # Coarse Pass
+        sample_coordinates = (ray_origins.unsqueeze(-2) + depths_coarse * ray_directions.unsqueeze(-2)).reshape(batch_size, -1, 3)
+        sample_directions = ray_directions.unsqueeze(-2).expand(-1, -1, samples_per_ray, -1).reshape(batch_size, -1, 3)
+
+        out = self.run_model(planes, decoder, sample_coordinates, sample_directions, rendering_options)
+        colors_coarse = out['rgb']
+        densities_coarse = out['sigma']
+        colors_coarse = colors_coarse.reshape(batch_size, num_rays, samples_per_ray, colors_coarse.shape[-1])
+        densities_coarse = densities_coarse.reshape(batch_size, num_rays, samples_per_ray, 1)
+
+        # Fine Pass
+        N_importance = rendering_options['depth_resolution_importance']
+        if N_importance > 0:
+            _, _, weights, _ = self.ray_marcher(colors_coarse, densities_coarse, depths_coarse, rendering_options, sample_coordinates)
+
+            depths_fine = self.sample_importance(depths_coarse, weights, N_importance)
+
+            sample_directions = ray_directions.unsqueeze(-2).expand(-1, -1, N_importance, -1).reshape(batch_size, -1, 3)
+            sample_coordinates_ = (ray_origins.unsqueeze(-2) + depths_fine * ray_directions.unsqueeze(-2)).reshape(batch_size, -1, 3)
+
+            out = self.run_model(planes, decoder, sample_coordinates_, sample_directions, rendering_options)
+            colors_fine = out['rgb']
+            densities_fine = out['sigma']
+            colors_fine = colors_fine.reshape(batch_size, num_rays, N_importance, colors_fine.shape[-1])
+            densities_fine = densities_fine.reshape(batch_size, num_rays, N_importance, 1)
+
+            all_depths, all_colors, all_densities = self.unify_samples(depths_coarse, colors_coarse, densities_coarse,
+                                                                  depths_fine, colors_fine, densities_fine)
+
+            sample_coordinates_ = torch.cat([sample_coordinates_, sample_coordinates], dim=2)
+
+            all_densities_swap = all_densities[[1,0]]
+            all_depths_swap = all_depths[[1,0]]
+
+            rgb_final, depth_final, weights, xyz = self.ray_marcher(all_colors, all_densities_swap, all_depths_swap, rendering_options, sample_coordinates_)
+            #heatmaps2D, _, _, _ = self.ray_marcher(heatmaps_3D, all_densities, all_depths, rendering_options, sample_coordinates_)
+
+        else:
+            rgb_final, depth_final, weights, xyz = self.ray_marcher(colors_coarse, densities_coarse, depths_coarse, rendering_options, sample_coordinates)
 
         return rgb_final, depth_final, weights.sum(2)
+
 
     def run_model(self, planes, decoder, sample_coordinates, sample_directions, options):
         sampled_features = sample_from_planes(self.plane_axes, planes, sample_coordinates, padding_mode='zeros', box_warp=options['box_warp'])

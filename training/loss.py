@@ -9,7 +9,6 @@
 # its affiliates is strictly prohibited.
 
 """Loss functions."""
-
 import numpy as np
 import torch
 from torch_utils import training_stats
@@ -18,9 +17,137 @@ from torch_utils.ops import upfirdn2d
 from training.dual_discriminator import filtered_resizing
 from face_parsing.model import BiSeNet
 from torch.nn import functional as F
-#----------------------------------------------------------------------------
+import os
+import cv2
 
-# for hair
+class RegionL1lossOp_Kmeans(torch.nn.Module):
+    def __init__(self, mask_path):
+        super(RegionL1lossOp_Kmeans, self).__init__()
+
+        self.l1_loss = torch.nn.L1Loss()
+
+        w = h = 64
+        scale = 8
+
+        w = w * scale
+        h = h * scale
+
+        self.bangs_mask = torch.zeros(size=[1, 3, h, w])
+        self.bangs_mask[:, :, 0:20*scale, 10*scale:54*scale] = 1
+
+        self.smile_mask = torch.zeros(size=[1, 3, h, w])
+        self.smile_mask[:, :, 36*scale:48*scale, 14*scale:50*scale] = 1
+
+        # self.bangs_mask = os.path.join(os.path.join(mask_path, 'bangs.png'))
+        # self.bangs_mask = torch.from_numpy(cv2.imread(self.bangs_mask)).float().permute(2,0,1).unsqueeze(0) / 255.0
+        self.hair_mask = os.path.join(os.path.join(mask_path, 'heatmap3_hair.png'))
+        self.hair_mask = torch.from_numpy(cv2.imread(self.hair_mask)).float().permute(2,0,1).unsqueeze(0) / 255.0
+
+        self.gender_mask = os.path.join(os.path.join(mask_path, 'heatmap3_face.png'))
+        self.gender_mask = torch.from_numpy(cv2.imread(self.gender_mask)).float().permute(2,0,1).unsqueeze(0) / 255.0
+
+    def forward(self, input_img, gt1, gt2, input, mask_id=0):
+
+        if mask_id == 0:
+
+            hair_mask = self.hair_mask.to(input_img.device)
+            target_loss = self.l1_loss(input ,
+                                       gt2 )
+            i_parsing_ = 1 - hair_mask
+            nontarget_loss = self.l1_loss(input * i_parsing_,
+                                          gt1 * i_parsing_)
+
+        elif mask_id == 1:
+
+            gender_mask = self.gender_mask.to(input_img.device).int()
+            hair_mask = self.hair_mask.to(input_img.device).int()
+
+            gender_mask = gender_mask ^ hair_mask
+            gender_mask = 1 - gender_mask
+
+            target_loss = 0.0
+            nontarget_loss = self.l1_loss(input * gender_mask,
+                                          gt1 * gender_mask)
+            i_parsing_ = gender_mask
+
+        elif mask_id == 2:
+
+            i_parsing_ = self.bangs_mask.to(input_img.device)
+            target_loss = self.l1_loss(input * i_parsing_, gt2 * i_parsing_)
+            i_parsing_ = 1 - i_parsing_
+            nontarget_loss = self.l1_loss(input * i_parsing_, gt1 * i_parsing_)
+
+        elif mask_id == 3:
+
+            gender_mask = self.gender_mask.to(input_img.device)
+            target_loss = self.l1_loss(input * gender_mask, gt1 * gender_mask)
+            nontarget_loss = 0.0
+            i_parsing_ = gender_mask
+
+        elif mask_id == 4:
+
+            i_parsing_ = self.smile_mask.to(input_img.device)
+            target_loss = self.l1_loss(input * i_parsing_, gt2 * i_parsing_)
+            i_parsing_ = 1 - i_parsing_
+            nontarget_loss = self.l1_loss(input * i_parsing_, gt1 * i_parsing_)
+
+        elif mask_id == 5:
+            i_parsing_ = self.beard_mask.to(input_img.device)
+            target_loss = self.l1_loss(input * i_parsing_, gt2 * i_parsing_)
+            nontarget_loss = 0.0
+
+        else:
+            nontarget_loss = 0.0
+            target_loss = 0.0
+            i_parsing_ = None
+
+        return nontarget_loss + target_loss, i_parsing_
+
+class RegionL1loss_Normal_Kmeans(torch.nn.Module):
+    def __init__(self, mask_path):
+        super(RegionL1loss_Normal_Kmeans, self).__init__()
+
+        self.l1_loss = torch.nn.L1Loss()
+        # self.bangs_mask = os.path.join(os.path.join(mask_path, 'bangs.png'))
+        # self.bangs_mask = cv2.resize(cv2.imread(self.bangs_mask), (128, 128))
+        # self.bangs_mask = torch.from_numpy(self.bangs_mask).float().unsqueeze(0) / 255.0
+        w = h = 64
+        scale = 2
+
+        w = w * scale
+        h = h * scale
+
+        self.bangs_mask = torch.zeros(size=[1, h, w, 3])
+        self.bangs_mask[:, 0:20*scale, 10*scale:54*scale, :] = 1
+
+        self.smile_mask = torch.zeros(size=[1, h, w, 3])
+        self.smile_mask[:, 36*scale:48*scale, 14*scale:50*scale, :] = 1
+
+    def forward(self, input_img, gt1, gt2, input, mask_id=0):
+
+        if mask_id == 2:
+
+            i_parsing_ = self.bangs_mask.to(input_img.device)
+            print(input.shape, i_parsing_.shape, gt2.shape)
+            target_loss = self.l1_loss(input * i_parsing_, gt2 * i_parsing_)
+            i_parsing_ = 1 - i_parsing_
+            nontarget_loss = self.l1_loss(input * i_parsing_, gt1 * i_parsing_)
+
+        elif mask_id == 4:
+
+            i_parsing_ = self.smile_mask.to(input_img.device)
+            target_loss = self.l1_loss(input * i_parsing_, gt2 * i_parsing_)
+            i_parsing_ = 1 - i_parsing_
+            nontarget_loss = self.l1_loss(input * i_parsing_, gt1 * i_parsing_)
+
+        else:
+
+            nontarget_loss = 0.0
+            target_loss = 0.0
+
+        return nontarget_loss + target_loss, i_parsing_
+
+
 class RegionL1lossOp(torch.nn.Module):
     def __init__(self):
         super(RegionL1lossOp, self).__init__()
@@ -28,7 +155,7 @@ class RegionL1lossOp(torch.nn.Module):
         self.l1_loss = torch.nn.L1Loss()
         n_classes = 19
         self.net = BiSeNet(n_classes=n_classes)
-        self.net.load_state_dict(torch.load('./79999_iter.pth'))
+        self.net.load_state_dict(torch.load('/nfs/data_todi/jzhang/code/eg3d/eg3d/pretrained_model/79999_iter.pth'))
         for param in self.net.parameters():
             param.requires_grad = False
 
@@ -142,11 +269,33 @@ class RegionL1lossOp(torch.nn.Module):
         return nontarget_loss + target_loss, i_parsing_
 
 
+def angular_loss(x1, x2):
+    # Reshape inputs to (batch_size, num_features)
+    x1_flat = x1.view(x1.size(0), -1)
+    x2_flat = x2.view(x2.size(0), -1)
+
+    # Normalize input vectors
+    x1_normalized = F.normalize(x1_flat, p=2, dim=1)
+    x2_normalized = F.normalize(x2_flat, p=2, dim=1)
+
+    # Compute cosine similarity
+    cosine_sim = torch.sum(x1_normalized * x2_normalized, dim=1)
+
+    # Compute angular distance
+    angular_dist = torch.acos(torch.clamp(cosine_sim, -1.0 + 1e-7, 1.0 - 1e-7))
+
+    return angular_dist.mean()
+
 class RegionL1loss_Normal(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, norm_loss=0):
         super(RegionL1loss_Normal, self).__init__()
 
-        self.l1_loss = torch.nn.L1Loss()
+        if norm_loss == 0:
+            self.loss = torch.nn.L1Loss()
+        elif norm_loss == 1:
+            self.loss = torch.nn.MSELoss()
+        else:
+            self.loss = angular_loss
         n_classes = 19
         self.net = BiSeNet(n_classes=n_classes)
         self.net.load_state_dict(torch.load('/nfs/data_todi/jzhang/code/eg3d/eg3d/pretrained_model/79999_iter.pth'))
@@ -173,16 +322,16 @@ class RegionL1loss_Normal(torch.nn.Module):
         if mask_id == 2:
 
             i_parsing_ = self.bangs_mask.to(input_img.device)
-            target_loss = self.l1_loss(input * i_parsing_, gt2 * i_parsing_)
+            target_loss = self.loss(input * i_parsing_, gt2 * i_parsing_)
             i_parsing_ = 1 - i_parsing_
-            nontarget_loss = self.l1_loss(input * i_parsing_, gt1 * i_parsing_)
+            nontarget_loss = self.loss(input * i_parsing_, gt1 * i_parsing_)
 
         elif mask_id == 4:
 
             i_parsing_ = self.smile_mask.to(input_img.device)
-            target_loss = self.l1_loss(input * i_parsing_, gt2 * i_parsing_)
+            target_loss = self.loss(input * i_parsing_, gt2 * i_parsing_)
             i_parsing_ = 1 - i_parsing_
-            nontarget_loss = self.l1_loss(input * i_parsing_, gt1 * i_parsing_)
+            nontarget_loss = self.loss(input * i_parsing_, gt1 * i_parsing_)
 
         else:
             

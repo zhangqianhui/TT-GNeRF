@@ -5,6 +5,7 @@
 [paper](https://arxiv.org/pdf/2208.12550.pdf) [Demo-Video](https://ttgnerf.github.io/TT-GNeRF/)<br>
 University of Trento, Snap Research, ETH Zurich
 
+
 ## Environments
 
 ```

@@ -13,33 +13,71 @@ import argparse
 import os
 import re
 from typing import List, Optional, Tuple, Union
-
 import click
 import dnnlib
 import numpy as np
 import PIL.Image
 import torch
 from tqdm import tqdm
-import mrcfile
-import cv2
 from torch.nn import functional as F
 import functools
-
+import imageio
 import legacy
 from camera_utils import LookAtPoseSampler, FOV_to_intrinsics
 from torch_utils import misc
-from training.triplane import TriPlaneGenerator
 from training.dual_discriminator import DualDiscriminator, depth2normal
 import lpips
-from torchvision import transforms, utils
-from dataset import FFHQFake
 from torch.utils import data
 import copy
 from torch import autograd
-from module.flow import cnf
-from math import log, pi
+from module.models import AttributeClassifier, TransferModel
+from dataset import FFHQFake
+from torchvision import transforms, utils
+import torch.nn as nn
 
-# ----------------------------------------------------------------------------
+ID_TO_CLS = [
+    '5_o_Clock_Shadow', #0
+    'Arched_Eyebrows', #1
+    'Attractive',   # 2
+    'Bags_Under_Eyes', # 3
+    'Bald',  # 4
+    'Bangs', # 5
+    'Big_Lips', # 6
+    'Big_Nose', # 7
+    'Black_Hair', # 8
+    'Blond_Hair', # 9
+    'Blurry', # 10
+    'Brown_Hair',  # 11
+    'Bushy_Eyebrows', # 12
+    'Chubby', # 13
+    'Double_Chin', # 14
+    'Eyeglasses', # 15
+    'Goatee',   # 16
+    'Gray_Hair', # 17
+    'Heavy_Makeup', # 18
+    'High_Cheekbones', # 19
+    'Male', # 20
+    'Mouth_Slightly_Open', # 21
+    'Mustache',  # 22
+    'Narrow_Eyes', # 23
+    'No_Beard',    # 24
+    'Oval_Face',   # 25
+    'Pale_Skin',
+    'Pointy_Nose',
+    'Receding_Hairline',
+    'Rosy_Cheeks',
+    'Sideburns',
+    'Smiling',
+    'Straight_Hair',
+    'Wavy_Hair',
+    'Wearing_Earrings',
+    'Wearing_Hat',
+    'Wearing_Lipstick',
+    'Wearing_Necklace',
+    'Wearing_Necktie',
+    'Young',
+]
+CLS_TO_ID = {v: k for k, v in enumerate(ID_TO_CLS)}
 
 def parse_range(s: Union[str, List]) -> List[int]:
     '''Parse a comma separated list of numbers or ranges and return a list of ints.
@@ -86,6 +124,7 @@ def make_transform(translate: Tuple[float, float], angle: float):
     m[1][2] = translate[1]
     return m
 
+
 # ----------------------------------------------------------------------------
 
 def create_samples(N=256, voxel_origin=[0, 0, 0], cube_length=2.0):
@@ -111,6 +150,7 @@ def create_samples(N=256, voxel_origin=[0, 0, 0], cube_length=2.0):
     num_samples = N ** 3
 
     return samples.unsqueeze(0), voxel_origin, voxel_size
+
 
 def data_sampler(dataset, shuffle, distributed):
     if distributed:
@@ -200,11 +240,6 @@ def accumulate(model1, model2, decay=0.999):
         if 'style_editing' in k:
             par1[k].data.mul_(decay).add_(par2[k].data, alpha=1 - decay)
 
-def standard_normal_logprob(z):
-    dim = z.size(-1)
-    log_z = -0.5 * dim * log(2 * pi)
-    return log_z - z.pow(2) / 2
-
 def training_steps(
         network_pkl,
         batch,
@@ -218,96 +253,89 @@ def training_steps(
         csvpath,
         common_kwargs,
         G_kwargs,
-        D_kwargs,
         loss_dict,
+        w_dir,
+        id,
+        ref_id
 ):
+
     device = torch.device('cuda')
+    camera_lookat_point = torch.tensor([0, 0, 0.2], device=device)
+    G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(
+        device)  # subclass of torch.nn.Module
+    G_ema = copy.deepcopy(G).eval()
+    G2 = copy.deepcopy(G)
 
     transform = transforms.Compose(
         [transforms.ToTensor(), transforms.Normalize([0.5], [0.5]), transforms.Resize((model_size, model_size))])
 
     dataset = FFHQFake(dataset_path, transform, model_size, csvpath)
 
-    loader = data.DataLoader(
-        dataset,
-        batch_size=batch,
-        sampler=data_sampler(dataset, shuffle=True, distributed=False),
-        drop_last=True,
-        pin_memory=True,
-        num_workers=4,
-    )
-
-    loader = sample_data(loader)
-
-    G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(
-        device)  # subclass of torch.nn.Module
-    D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(True).to(
-        device)  # subclass of torch.nn.Module
-    G_ema = copy.deepcopy(G).eval()
-
-    # Resume from existing pickle
     if network_pkl is not None:
         print(f'Resuming from "{network_pkl}"')
         with dnnlib.util.open_url(network_pkl) as f:
             resume_data = legacy.load_network_pkl(f)
-        for name, module in [('G', G), ('G_ema', G_ema)]:
+        for name, module in [('G', G), ('G_ema', G_ema), ('G',  G2)]:
             misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
 
     if not os.path.exists(outdir):
         os.mkdir(outdir)
 
-    prior = cnf(512, args.flow_modules, args.cond_size, 1)
+    outdir = outdir + '_' + str(id) + '_' + str(ref_id)
 
-    initial_learning_rate = 0.0001
-    opti = torch.optim.Adam(prior.parameters(), betas=(0.9, 0.999), lr=initial_learning_rate)
+    print(device)
+    classifier = AttributeClassifier(device=device)
+    classifier.to(device)
 
-    for step in range(num_steps):
+    if not os.path.exists(outdir):
+        os.mkdir(outdir)
 
-        o_real_img, labels, ws, pose = next(loader)
-        labels = labels.to(device).float()
-        ws = ws.to(device).float()
-        labels = labels.unsqueeze(-1)
+    original_label = torch.tensor([dataset[id][1]]).float()
+    w = torch.from_numpy(dataset[id][2]).unsqueeze(0)
+    ws = w.to(device)
+    original_label = original_label.to(device)
 
-        approx21, delta_log_p2 = prior(ws, labels, torch.zeros(args.batch, ws.shape[1], 1).to(ws))
-        approx2 = standard_normal_logprob(approx21).view(args.batch, -1).sum(1, keepdim=True)
+    cam2world_pose = LookAtPoseSampler.sample(
+        3.14 / 2, 3.14 / 2 - 0.05,
+        camera_lookat_point, radius=2.7, device=device)
 
-        delta_log_p2 = delta_log_p2.view(args.batch, ws.shape[1], 1).sum(1)
-        log_p2 = (approx2 - delta_log_p2)
-        loss = - log_p2.mean()
+    intrinsics = torch.tensor([[4.2647, 0, 0.5], [0, 4.2647, 0.5], [0, 0, 1]], device=device)
+    c = torch.cat([cam2world_pose.reshape(-1, 16), intrinsics.reshape(-1, 9)], 1)
+    img_ref1 = G2.synthesis(ws=ws, c=c, noise_mode='const', neural_rendering_resolution=128)['image']
 
-        opti.zero_grad()
-        loss.backward()
-        opti.step()
+    logits = classifier(img_ref1)
+    criterion = nn.CrossEntropyLoss()
 
-        if step % 10 == 0:
-            print(f"step: {step} "
-                  f"loss: {loss:.3f} "
-                  )
+    indices = [8, 20, 4, -1, -9, 24]
+    logits = logits[:,indices]
+    logits[:,1:5] = 1 - logits[:,1:5]
 
-        if step % 1000 == 0:
-            torch.save(
-                prior.state_dict(), os.path.join(outdir, f'modellarge10k_{str(step).zfill(6)}.pt')
-            )
+    print(logits)
 
-    torch.save(
-        prior.state_dict(), os.path.join(outdir, f'trained_model/modellarge10k_{str(step).zfill(6)}.pt')
-    )
+    print(original_label.dtype, logits.dtype)
+    loss = criterion(logits, original_label)
 
+    print(loss.item())
 
+    #
+    # PIL.Image.fromarray(editing_triot.permute(0, 2, 3, 1)[0].clamp(0, 255).cpu().to(torch.uint8).numpy(), 'RGB').save(
+    #     f'{outdir}/{id}_orginal.png')
 
 # ----------------------------------------------------------------------------
-
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="EG3D inversion")
     parser.add_argument("--network_pkl", type=str,
-                        default='/apdcephfs/share_1330077/chjingzhang/pretrained_model/eg3d/ffhq512-128.pkl',
+                        default='/nfs/data_chaos/jzhang/dataset/pretrained/eg3d/ffhq512-128.pkl',
                         help="path to the network pkl")
     parser.add_argument("--outdir", type=str, default='./outputs/', help="path to the lmdb dataset")
+    parser.add_argument("--w_dir", type=str, default='./outputs/', help="the save w path")
     parser.add_argument('--truncation_psi', type=float, default=1.0, help='truncation_psi')
     parser.add_argument("--iter", type=int, default=10000, help="total training iterations")
+    parser.add_argument("--id", type=int, default=0, help="id")
+    parser.add_argument("--ref_id", type=int, default=0, help="ref_id")
     parser.add_argument("--fov_deg", type=float, default=18.837, help="total training iterations")
-    parser.add_argument("--batch", type=int, default=1, help="batch sizes for each gpus")
+    parser.add_argument("--batch", type=int, default=16, help="batch sizes for each gpus")
     parser.add_argument("--model_size", type=int, default=512, help="model size")
     parser.add_argument("--dataset_path", type=str, default='./training_data_40000', help="path to the dataset path")
     parser.add_argument("--csvpath", type=str, default='./training_data_40000', help="path to csv file")
@@ -341,8 +369,6 @@ if __name__ == "__main__":
     parser.add_argument('--label_lambda_d', help='weight for lambda d',
                         type=int, default=1)
 
-    parser.add_argument("--flow_modules", type=str, default='512-512-512-512-512')
-
     parser.add_argument('--label_lambda_g', help='weight for lambda g',
                         type=int, default=10)
 
@@ -369,14 +395,11 @@ if __name__ == "__main__":
 
     parser.add_argument('--is_weighted', help='whether using weightd cls',
                         type=bool, default=True)
-    parser.add_argument("--cond_size", type=int, default=6)
 
     args = parser.parse_args()
-
     G_kwargs = dnnlib.EasyDict(class_name=None, z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict())
     D_kwargs = dnnlib.EasyDict(class_name='training.networks_stylegan2.Discriminator',
-                               block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(),
-                               epilogue_kwargs=dnnlib.EasyDict())
+                    block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
 
     G_kwargs.channel_base = D_kwargs.channel_base = args.cbase
     G_kwargs.channel_max = D_kwargs.channel_max = args.cmax
@@ -425,22 +448,11 @@ if __name__ == "__main__":
     G_kwargs.rendering_kwargs = rendering_options
     G_kwargs.num_fp16_res = 0
     G_kwargs.sr_num_fp16_res = args.sr_num_fp16_res
-
-    G_kwargs.sr_kwargs = dnnlib.EasyDict(channel_base=args.cbase, channel_max=args.cmax,
-                                         fused_modconv_default='inference_only')
+    G_kwargs.sr_kwargs = dnnlib.EasyDict(channel_base=args.cbase, channel_max=args.cmax, fused_modconv_default='inference_only')
     G_kwargs.num_fp16_res = args.g_num_fp16_res
     G_kwargs.conv_clamp = 256 if args.g_num_fp16_res > 0 else None
 
-    D_kwargs.block_kwargs.freeze_layers = args.freezed
-    D_kwargs.epilogue_kwargs.mbstd_group_size = None
-    D_kwargs.class_name = 'training.dual_discriminator.DualDiscriminator'
-    D_kwargs.disc_c_noise = args.disc_c_noise  # Regularization for discriminator pose conditioning
-
-    D_kwargs.num_fp16_res = args.d_num_fp16_res
-    D_kwargs.conv_clamp = 256 if args.d_num_fp16_res > 0 else None
-
     common_kwargs = dict(c_dim=25, label_dim=args.label_dim, img_resolution=args.resolution, img_channels=3)
-
     loss_dict = dict(label_lambda_d=args.label_lambda_d,
                      label_lambda_g=args.label_lambda_g,
                      r1=args.r1,
@@ -448,12 +460,10 @@ if __name__ == "__main__":
                      label_w_recon=args.label_w_recon,
                      label_image_recon=args.label_image_recon,
                      label_cls_d=args.label_cls_d,
-                     is_weighted=args.is_weighted
-                     )
+                     is_weighted=args.is_weighted)
 
     training_steps(args.network_pkl, args.batch, args.truncation_psi, args.trunccutoff, args.outdir, args.num_steps,
                    args.fov_deg,
-                   args.model_size, args.dataset_path, args.csvpath, common_kwargs, G_kwargs, D_kwargs,
-                   loss_dict)  # pylint: disable=no-value-for-parameter
-
+                   args.model_size, args.dataset_path, args.csvpath, common_kwargs, G_kwargs,
+                   loss_dict, args.w_dir, args.id, args.ref_id)  # pylint: disable=no-value-for-parameter
 # ----------------------------------------------------------------------------
